@@ -93,6 +93,8 @@ int DatagramServiceClient::send(Packet* pack) {
 		return false;
 
 	if (socket != nullptr) {
+		++sentPacketCount;
+
 		// FIXME: temp hack for stm
 	#ifdef WITH_STM
 		Message* message = new Message(pack, this);

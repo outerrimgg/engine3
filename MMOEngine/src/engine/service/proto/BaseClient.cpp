@@ -1377,6 +1377,9 @@ bool BaseClient::handleNetStatusRequest(Packet* pack) {
 		uint16 ourTick = Time().getMiliTime() & 0xFFFF;
 		uint16 tick = pack->parseNetShort();
 
+		uint64 clientSentPackets = 0;
+		uint64 clientReceivedPackets = 0;
+
 		try {
 			uint32 unk1 = pack->parseInt();
 			uint32 unk2 = pack->parseInt();
@@ -1384,8 +1387,11 @@ bool BaseClient::handleNetStatusRequest(Packet* pack) {
 			uint32 unk4 = pack->parseInt();
 			uint32 unk5 = pack->parseInt();
 
-			remoteStats.setTotalPacketsSent(pack->parseNetLong());
-			remoteStats.setTotalPacketsReceived(pack->parseNetLong());
+			clientSentPackets = pack->parseNetLong();
+			clientReceivedPackets = pack->parseNetLong();
+
+			remoteStats.setTotalPacketsSent(clientSentPackets);
+			remoteStats.setTotalPacketsReceived(clientReceivedPackets);
 		} catch (Exception& e) {
 			error() << __PRETTY_FUNCTION__ << " " << ip_full << ": " << e.getMessage();
 		}
@@ -1439,7 +1445,8 @@ bool BaseClient::handleNetStatusRequest(Packet* pack) {
 
 		netcheckupEvent->rescheduleInIoScheduler(NETSTATUSCHECKUP_TIMEOUT);
 
-		BasePacket* resp = new NetStatusResponseMessage(tick);
+		BasePacket* resp = new NetStatusResponseMessage(tick, (uint32) Time().getMiliTime(),
+				clientSentPackets, clientReceivedPackets, getSentPacketCount(), getReceivedPacketCount());
 		sendPacket(resp);
 
 	} catch (Exception& e) {

@@ -35,6 +35,8 @@ BasePacketHandler::BasePacketHandler(const String& s, ServiceHandler* handler) :
 void BasePacketHandler::handlePacket(BaseClient* client, Packet* pack) {
 	debug() << "READ - " << *pack;
 
+	client->countReceivedPacket();
+
 	try {
 		uint16 opcode = pack->parseShort();
 

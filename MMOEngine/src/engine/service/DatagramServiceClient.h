@@ -17,6 +17,10 @@ namespace engine {
 	protected:
 		bool doRun = true;
 
+		// datagram counters for SOE net-status reporting (display stats, races tolerated)
+		uint64 sentPacketCount = 0;
+		uint64 receivedPacketCount = 0;
+
 	public:
 		DatagramServiceClient();
 		DatagramServiceClient(const String& host, int port);
@@ -26,6 +30,18 @@ namespace engine {
 
 		void stop() {
 			doRun = false;
+		}
+
+		inline void countReceivedPacket() {
+			++receivedPacketCount;
+		}
+
+		inline uint64 getSentPacketCount() const {
+			return sentPacketCount;
+		}
+
+		inline uint64 getReceivedPacketCount() const {
+			return receivedPacketCount;
 		}
 
 		void recieveMessages();
