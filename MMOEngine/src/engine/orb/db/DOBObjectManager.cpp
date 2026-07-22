@@ -447,6 +447,30 @@ void DOBObjectManager::updateModifiedObjectsToDatabase(int flags) {
 
 	UniqueReference<Vector<Pair<Locker*, TaskWorkerThread*>>*> lockers(Core::getTaskManager()->blockTaskManager());
 
+	// Exception-safety guard (2026-07-22): blockTaskManager() paused every task worker and
+	// scheduler (their blockMutexes are held by the Locker* elements of `lockers`). If any
+	// step below throws before the save is handed off to the async commit thread, the
+	// unblockTaskManager() call further down is skipped and every worker stays paused
+	// forever -> a silent all-parked server freeze with no visible lock cycle. This guard
+	// guarantees the workers are resumed and objectUpdateInProgress is cleared on any early
+	// exit. unblockTaskManager() is idempotent (it removeAll()s the vector), so the normal
+	// path's call below leaves this guard a no-op. Disarmed once the save is handed off.
+	struct SaveQuiesceGuard {
+		Vector<Pair<Locker*, TaskWorkerThread*>>* lockers;
+		AtomicBoolean& inProgress;
+		bool handedOff;
+
+		SaveQuiesceGuard(Vector<Pair<Locker*, TaskWorkerThread*>>* l, AtomicBoolean& p)
+			: lockers(l), inProgress(p), handedOff(false) {}
+
+		~SaveQuiesceGuard() {
+			if (!handedOff) {
+				Core::getTaskManager()->unblockTaskManager(lockers);
+				inProgress = false;
+			}
+		}
+	} saveQuiesceGuard(lockers.get(), objectUpdateInProgress);
+
 	info(true) << "waited for task manager to stop for " << nsToString(stopWaitTimer.stop());
 
 	Locker _locker(this);
@@ -518,6 +542,10 @@ void DOBObjectManager::updateModifiedObjectsToDatabase(int flags) {
 
 	CommitMasterTransactionThread::instance()->startWatch(transaction, &updateModifiedObjectsThreads,
 			updateModifiedObjectsThreads.size(), objectsToDeleteFromRAM);
+
+	// Save is now owned by the async commit thread (which resets objectUpdateInProgress on
+	// completion); disarm the early-exit quiesce guard so it does not clear it prematurely.
+	saveQuiesceGuard.handedOff = true;
 
 #ifndef WITH_STM
 	_locker.release();
