@@ -51,7 +51,12 @@ void DOBMessageFactory::process(DOBServiceClient* client, Packet* message) {
 
 		if (messageType != DOBMessage::REPLYMESSAGE) {
 			DOBMessage* dobMessage = create(messageType, message);
-			broker->fatal(dobMessage != nullptr) << "dobMessage is null";
+
+			if (dobMessage == nullptr) {
+				broker->warning() << "discarding message with unknown type " << messageType;
+
+				return;
+			}
 
 			dobMessage->setClient(client);
 
@@ -70,7 +75,15 @@ void DOBMessageFactory::process(DOBServiceClient* client, Packet* message) {
 				}
 			}
 		} else {
-			DOBMessage* queuedMessage = client->getQueuedMessage(message->parseInt());
+			uint32 sequence = message->parseInt();
+
+			DOBMessage* queuedMessage = client->getQueuedMessage(sequence);
+
+			if (queuedMessage == nullptr) {
+				broker->warning() << "discarding reply with unknown sequence " << sequence;
+
+				return;
+			}
 
 			broker->debug() << "DOBMessage(" << queuedMessage->getSequence() << "): "
 							<< "reply arrived with content: " << message->toStringData();

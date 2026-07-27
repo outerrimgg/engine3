@@ -47,11 +47,10 @@ namespace engine {
 			return rob;
 		}
 
+		// returns nullptr when the sequence is not queued; the caller discards the
+		// reply rather than aborting, since the sequence is attacker controlled
 		DOBMessage* getQueuedMessage(uint32 sequence) {
-			DOBMessage* message = sentMessageQueue.remove(sequence);
-			fatal(message != nullptr) << "message is null";
-
-			return message;
+			return sentMessageQueue.remove(sequence);
 		}
 	};
 
