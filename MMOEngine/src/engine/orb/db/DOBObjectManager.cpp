@@ -540,6 +540,19 @@ void DOBObjectManager::updateModifiedObjectsToDatabase(int flags) {
 		}
 	}
 
+	// Drop the strong references acquired during the full-update directory scan
+	// (runObjectsMarkedForUpdate). The objects have been serialized into RAM (and dumped above,
+	// if requested), so the save no longer needs to pin them alive; release before the async
+	// commit thread runs garbage collection so its reference-count checks see true counts. These
+	// vectors are empty on the delta path, so this is a no-op there. Fixes a use-after-free where
+	// an object destroyed on another thread between the scan and writeObject was serialized
+	// through a freed implementation vtable.
+	for (int i = 0; i < objectsToUpdate.size(); ++i)
+		objectsToUpdate.getUnsafe(i)->release();
+
+	for (int i = 0; i < objectsToDelete.size(); ++i)
+		objectsToDelete.getUnsafe(i)->release();
+
 	CommitMasterTransactionThread::instance()->startWatch(transaction, &updateModifiedObjectsThreads,
 			updateModifiedObjectsThreads.size(), objectsToDeleteFromRAM);
 
@@ -1042,8 +1055,10 @@ int DOBObjectManager::runObjectsMarkedForUpdate(engine::db::berkeley::Transactio
 
 		if (dobObject->_isMarkedForDeletion()) {
 			objectsToDelete.emplace(dobObject);
+			dobObject->acquire(); // pin for the save window; released in updateModifiedObjectsToDatabase (mirrors the delta path)
 		} else if (dobObject->_isUpdated() && managedObject->isPersistent()) {
 			objectsToUpdate->emplace(dobObject);
+			dobObject->acquire(); // pin for the save window; released in updateModifiedObjectsToDatabase (mirrors the delta path)
 
 			objectsToUpdateCount++;
 		}
