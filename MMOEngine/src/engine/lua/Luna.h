@@ -82,6 +82,10 @@ extern "C" {
 #include <lauxlib.h>
 }
 
+#include <cstring>
+
+#include "system/lang/Exception.h"
+
 namespace engine {
 namespace lua {
 
@@ -104,7 +108,27 @@ template<class T> class Luna {
     }
 
     static int constructor(lua_State *L) {
-      return inject(L, new T(L));
+      // A C++ exception must never unwind into the (C-compiled) Lua VM, whose
+      // protected-call machinery is setjmp/longjmp and cannot intercept it: the
+      // unwind bypasses Lua's error recovery and leaves this thread's lua_State
+      // corrupt (dangling open upvalues), crashing later in luaC_upvalbarrier.
+      // Catch here (all C++ destructors run during unwind) and convert to a
+      // normal Lua error via lua_error() AFTER the catch scope has unwound.
+      char errbuf[256];
+      try {
+        return inject(L, new T(L));
+      } catch (const Exception& e) {
+        const char* w = e.what();
+        std::strncpy(errbuf, w ? w : "C++ exception (no message)", sizeof(errbuf) - 1);
+        errbuf[sizeof(errbuf) - 1] = '\0';
+      } catch (...) {
+        std::strncpy(errbuf, "unhandled C++ exception in Lua constructor", sizeof(errbuf) - 1);
+        errbuf[sizeof(errbuf) - 1] = '\0';
+      }
+      // Push + raise OUTSIDE the catch: lua_pushstring can allocate and longjmp,
+      // which must not fire while a C++ exception frame is still unwinding.
+      lua_pushstring(L, errbuf);
+      return lua_error(L);
     }
 
     static int inject(lua_State *L, T* obj) {
@@ -137,14 +161,38 @@ template<class T> class Luna {
       T** obj = static_cast<T**>(luaL_checkudata(L, -1, T::className));
       lua_remove(L, -1); // remove the userdata from the stack
 
-      return ((*obj)->*(T::Register[i].mfunc))(L); // execute the thunk
+      // Guard the C++/Lua boundary: a C++ exception thrown by the bound method
+      // must not unwind into the C-compiled Lua VM (it would corrupt this
+      // thread's lua_State and crash later in luaC_upvalbarrier). Convert it to
+      // a normal Lua error; lua_error() longjmps AFTER the catch has unwound.
+      char errbuf[256];
+      try {
+        return ((*obj)->*(T::Register[i].mfunc))(L); // execute the thunk
+      } catch (const Exception& e) {
+        const char* w = e.what();
+        std::strncpy(errbuf, w ? w : "C++ exception (no message)", sizeof(errbuf) - 1);
+        errbuf[sizeof(errbuf) - 1] = '\0';
+      } catch (...) {
+        std::strncpy(errbuf, "unhandled C++ exception in Lua method binding", sizeof(errbuf) - 1);
+        errbuf[sizeof(errbuf) - 1] = '\0';
+      }
+      // Push + raise OUTSIDE the catch: lua_pushstring can allocate and longjmp,
+      // which must not fire while a C++ exception frame is still unwinding.
+      lua_pushstring(L, errbuf);
+      return lua_error(L);
     }
 
     static int gc_obj(lua_State *L) {
       // clean up
       //printf("GC called: %s\n", T::className);
       T** obj = static_cast<T**>(luaL_checkudata(L, -1, T::className));
-      delete (*obj);
+      // Runs as a Lua __gc finalizer inside a GC step; a C++ exception escaping
+      // here would unwind into the VM mid-collection. Destructors must not throw
+      // — swallow defensively rather than corrupt the collector.
+      try {
+        delete (*obj);
+      } catch (...) {
+      }
       return 0;
     }
 

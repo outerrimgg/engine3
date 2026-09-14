@@ -9,8 +9,42 @@
 
 #include "LuaPanicException.h"
 
+#include "system/lang/Exception.h"
+
+#include <cstring>
+
 namespace LuaNamespace {
 	static Logger logger("Lua", Lua::INFO);
+
+	// Guards a globally-registered C function so a C++ exception thrown by the
+	// binding never unwinds into the C-compiled Lua VM (whose protected-call
+	// machinery is setjmp/longjmp and cannot intercept a C++ throw). Such an
+	// unwind bypasses Lua's error recovery and leaves the thread's lua_State
+	// corrupt (dangling open upvalues), crashing later in luaC_upvalbarrier.
+	// The real function pointer is carried as upvalue(1); on a C++ throw we
+	// convert it to a normal Lua error via lua_error() AFTER the catch scope
+	// has fully unwound (so the binding's C++ destructors have run first).
+	static int guardedCFunction(lua_State* L) {
+		lua_CFunction realFunction = (lua_CFunction) lua_touserdata(L, lua_upvalueindex(1));
+
+		char errbuf[256];
+
+		try {
+			return realFunction(L);
+		} catch (const Exception& e) {
+			const char* w = e.what();
+			std::strncpy(errbuf, w ? w : "C++ exception (no message)", sizeof(errbuf) - 1);
+			errbuf[sizeof(errbuf) - 1] = '\0';
+		} catch (...) {
+			std::strncpy(errbuf, "unhandled C++ exception in Lua C function", sizeof(errbuf) - 1);
+			errbuf[sizeof(errbuf) - 1] = '\0';
+		}
+
+		// Push + raise OUTSIDE the catch: lua_pushstring can allocate and longjmp,
+		// which must not fire while a C++ exception frame is still unwinding.
+		lua_pushstring(L, errbuf);
+		return lua_error(L);
+	}
 }
 
 using namespace LuaNamespace;
@@ -51,7 +85,12 @@ void Lua::deinit() {
 }
 
 void Lua::registerFunction(const char* name, int(*functionPointer)(lua_State*)) {
-	lua_register(L, name, functionPointer);
+	// Register through guardedCFunction (real pointer carried as an upvalue) so
+	// every globally-registered binding is exception-safe at the C++/Lua boundary
+	// instead of lua_register()'ing the raw pointer that can throw into the VM.
+	lua_pushlightuserdata(L, (void*) functionPointer);
+	lua_pushcclosure(L, &LuaNamespace::guardedCFunction, 1);
+	lua_setglobal(L, name);
 }
 
 bool Lua::runFile(const String& filename) {
