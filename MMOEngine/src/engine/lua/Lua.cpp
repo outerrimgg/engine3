@@ -13,11 +13,13 @@
 
 #include <cstring>
 
-// Forward-decl of Lua's internal error type (defined in ldo.c). Under the
-// C++-compiled Lua VM a Lua error is raised as `throw((lua_longjmp*)c)`; the
-// trampoline rethrows it untouched so a real in-binding Lua error reaches the
-// enclosing pcall intact instead of being re-wrapped as a foreign C++ exception.
-struct lua_longjmp;
+// Under the C++-compiled Lua VM a Lua error is raised as `throw((lua_longjmp*)c)`
+// -- an object-pointer exception. guardedCFunction catches it via `catch (void*)`
+// and rethrows it untouched (lua_longjmp is an incomplete type here and cannot be
+// named in a handler; void* matches any object-pointer exception, and nothing in
+// this codebase throws a pointer exception except the VM), so a real in-binding
+// Lua error reaches the enclosing pcall intact instead of being re-wrapped as a
+// foreign C++ exception.
 
 namespace LuaNamespace {
 	static Logger logger("Lua", Lua::INFO);
@@ -37,8 +39,8 @@ namespace LuaNamespace {
 
 		try {
 			return realFunction(L);
-		} catch (lua_longjmp*) {
-			throw; // genuine Lua error under the C++-compiled VM: propagate untouched
+		} catch (void*) {
+			throw; // genuine Lua error (VM throws lua_longjmp*) under the C++ VM: propagate untouched
 		} catch (const Exception& e) {
 			const char* w = e.what();
 			std::strncpy(errbuf, w ? w : "C++ exception (no message)", sizeof(errbuf) - 1);

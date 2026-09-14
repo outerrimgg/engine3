@@ -86,12 +86,15 @@ extern "C" {
 
 #include "system/lang/Exception.h"
 
-// Forward-decl of Lua's internal error type (defined in ldo.c). When Lua is
-// compiled as C++ (see MMOCoreORB/external/lua), a Lua error is raised as
-// `throw((lua_longjmp*)c)`; the guards below rethrow it untouched so a genuine
-// in-binding Lua error propagates to the enclosing pcall with its real error
-// object, instead of being mislabeled/re-wrapped as a foreign C++ exception.
-struct lua_longjmp;
+// Under the C++-compiled Lua VM (see MMOCoreORB/external/lua) a Lua error is
+// raised as `throw((lua_longjmp*)c)` -- an object-pointer exception. The guards
+// below catch it via `catch (void*)` and rethrow it untouched (lua_longjmp is an
+// incomplete type here and cannot be named in a handler; void* matches any
+// object-pointer exception via a standard pointer conversion, and nothing in
+// this codebase throws a pointer exception except the VM). This lets a genuine
+// in-binding Lua error reach the enclosing pcall with its real error object,
+// instead of being re-wrapped as a foreign C++ exception. Engine/std exceptions
+// are thrown by value and are unaffected.
 
 namespace engine {
 namespace lua {
@@ -124,8 +127,8 @@ template<class T> class Luna {
       char errbuf[256];
       try {
         return inject(L, new T(L));
-      } catch (lua_longjmp*) {
-        throw; // genuine Lua error under the C++-compiled VM: propagate untouched
+      } catch (void*) {
+        throw; // genuine Lua error (VM throws lua_longjmp*) under the C++ VM: propagate untouched
       } catch (const Exception& e) {
         const char* w = e.what();
         std::strncpy(errbuf, w ? w : "C++ exception (no message)", sizeof(errbuf) - 1);
@@ -177,8 +180,8 @@ template<class T> class Luna {
       char errbuf[256];
       try {
         return ((*obj)->*(T::Register[i].mfunc))(L); // execute the thunk
-      } catch (lua_longjmp*) {
-        throw; // genuine Lua error under the C++-compiled VM: propagate untouched
+      } catch (void*) {
+        throw; // genuine Lua error (VM throws lua_longjmp*) under the C++ VM: propagate untouched
       } catch (const Exception& e) {
         const char* w = e.what();
         std::strncpy(errbuf, w ? w : "C++ exception (no message)", sizeof(errbuf) - 1);
