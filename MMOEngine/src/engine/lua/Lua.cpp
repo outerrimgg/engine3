@@ -13,6 +13,12 @@
 
 #include <cstring>
 
+// Forward-decl of Lua's internal error type (defined in ldo.c). Under the
+// C++-compiled Lua VM a Lua error is raised as `throw((lua_longjmp*)c)`; the
+// trampoline rethrows it untouched so a real in-binding Lua error reaches the
+// enclosing pcall intact instead of being re-wrapped as a foreign C++ exception.
+struct lua_longjmp;
+
 namespace LuaNamespace {
 	static Logger logger("Lua", Lua::INFO);
 
@@ -31,6 +37,8 @@ namespace LuaNamespace {
 
 		try {
 			return realFunction(L);
+		} catch (lua_longjmp*) {
+			throw; // genuine Lua error under the C++-compiled VM: propagate untouched
 		} catch (const Exception& e) {
 			const char* w = e.what();
 			std::strncpy(errbuf, w ? w : "C++ exception (no message)", sizeof(errbuf) - 1);
