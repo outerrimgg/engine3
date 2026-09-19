@@ -73,6 +73,20 @@ namespace engine {
 			_impl = impl;
 		}
 
+		// Failsafe for the dangling-_impl use-after-free family (prod 2026-09-07/
+		// 09-12/09-19): if a servant is destroyed while this stub still points
+		// _impl at it, raw-null _impl so the forwarders' (_impl == NULL) guard
+		// stops virtual-dispatching through freed memory. initializeWithoutAcquire
+		// is a raw store -- it must NOT release the (already-dying) servant (a
+		// normal _impl = nullptr would release() the terminal servant and underflow
+		// its already-zero strong count). NON-virtual by design: a new virtual in
+		// this tree-wide base header would shift vtable indices under the box's
+		// incremental-only GCC14 builds.
+		void _clearDeadImplementation(DistributedObjectServant* dying) {
+			if (_getImplementationForRead() == dying)
+				_impl.initializeWithoutAcquire(nullptr);
+		}
+
 		// getters
 		inline bool isDeployed() const {
 			return deployed;
