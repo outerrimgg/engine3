@@ -73,15 +73,31 @@ namespace engine {
 			_impl = impl;
 		}
 
-		// Failsafe for the dangling-_impl use-after-free family (prod 2026-09-07/
-		// 09-12/09-19): if a servant is destroyed while this stub still points
-		// _impl at it, raw-null _impl so the forwarders' (_impl == NULL) guard
-		// stops virtual-dispatching through freed memory. initializeWithoutAcquire
-		// is a raw store -- it must NOT release the (already-dying) servant (a
-		// normal _impl = nullptr would release() the terminal servant and underflow
-		// its already-zero strong count). NON-virtual by design: a new virtual in
-		// this tree-wide base header would shift vtable indices under the box's
-		// incremental-only GCC14 builds.
+		// ⛔ NOT CALLED, AND MUST NOT BE CALLED AS-IS. Kept only to document the
+		// attempted mitigation for the dangling-_impl UAF family (prod 2026-09-07/
+		// 09-12/09-19) and to make re-enabling it a one-line change once the
+		// precondition below is met.
+		//
+		// The intent was: if a servant is destroyed while this stub still points
+		// _impl at it, raw-null _impl so the forwarders' (_impl == NULL) guard stops
+		// virtual-dispatching through freed memory. initializeWithoutAcquire is a
+		// raw store so it does not release the already-dying servant and underflow
+		// its zero strong count, and it is non-virtual so it cannot shift vtable
+		// indices under the box's incremental-only GCC14 builds.
+		//
+		// Why it is disabled: it leaves the stub at deployed == true with
+		// _impl == nullptr, which no forwarder handles.
+		// ManagedObjectImplementation::wlock takes the real pthread rwlock BEFORE
+		// testing _impl; __wlock then sees deployed == true, builds an RPC and
+		// throws; Locker's ctor throws after the lock is held but before ~Locker
+		// exists, so the write lock is leaked permanently and every later thread
+		// blocks on that object. The unlock path throws from inside ~Locker, which
+		// is implicitly noexcept, and terminates the process. Clearing `deployed`
+		// does not help -- the !deployed branch throws too.
+		//
+		// PRECONDITION to re-enable: make the lock forwarders test _impl BEFORE
+		// acquiring the rwlock (and return/throw a catchable ObjectNotLocalException
+		// without holding it). Until then, the destructor only reports.
 		void _clearDeadImplementation(DistributedObjectServant* dying) {
 			if (_getImplementationForRead() == dying)
 				_impl.initializeWithoutAcquire(nullptr);
