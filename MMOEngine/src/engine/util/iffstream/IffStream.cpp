@@ -95,6 +95,19 @@ void IffStream::loadMainChunks(char* dataBuffer) {
 		uint32 size = htonl(readPrimitiveFrom<uint32>(dataBuffer, offset));
 		offset += 4;
 
+		// Outer Rim: reject a chunk length that runs past the end of the buffer.
+		// A garbage length (failed/corrupt decompress, or a smashed heap block)
+		// otherwise feeds Chunk::Chunk an unbounded copy -> multi-GB read off the
+		// end of the buffer -> whole-server SIGSEGV. Failing the parse here lets
+		// the caller (e.g. DataArchiveStore::openIffFile) catch it, log, and
+		// return nullptr, exactly as it already does for a too-short file.
+		if (offset > dataSize || size > dataSize - offset) {
+			error() << "corrupt IFF chunk in " << fileName << ": size " << size
+					<< " exceeds " << (offset > dataSize ? 0 : dataSize - offset)
+					<< " bytes remaining at offset " << offset;
+			throw InvalidFileTypeException(this);
+		}
+
 		Chunk* chunk = createChunk(nullptr, type, size, dataBuffer + offset);
 		chunk->setIffStream(this);
 		chunk->parseData();
