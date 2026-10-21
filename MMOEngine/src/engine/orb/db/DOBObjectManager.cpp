@@ -25,6 +25,7 @@
 #include <chrono>
 
 #include "engine/core/TaskWorkerThread.h"
+#include "engine/core/TaskScheduler.h"
 
 #include "engine/orb/DistributedObjectBroker.h"
 
@@ -55,6 +56,9 @@ namespace DOB {
 	static int INITIALUPDATEMODIFIEDOBJECTSTHREADS = 2;
 	static int MIN_UPDATE_THREADS = 2;
 	static int MAX_UPDATE_THREADS = 8;
+
+	// Set while one thread is inside ObjectBrokerDirector::createBackup (see DOBObjectManager::createBackup).
+	static AtomicBoolean backupStarting = false;
 
 	const ArrayList<void*>& getIgnoreAddresses() {
 		const static ArrayList<void*> vec = [] () {
@@ -116,10 +120,38 @@ DOBObjectManager::DOBObjectManager() : Logger("ObjectManager") {
 }
 
 void DOBObjectManager::createBackup(int flags) {
-	if (DistributedObjectBroker::instance()->isRootBroker())
-		ObjectBrokerDirector::instance()->createBackup(flags);
-	else
+	if (!DistributedObjectBroker::instance()->isRootBroker()) {
 		warning("remote backup creation not implemented yet");
+		return;
+	}
+
+	// Outer Rim: the director lock is held across blockTaskManager(), which waits for every blocking worker's and
+	// scheduler's blockMutex - and those threads hold their own blockMutex while they run a task. A worker that called
+	// createBackup (UpdateModifiedObjectsTask) and blocked on the director while another thread's save sat in that
+	// barrier was an ABBA deadlock of the whole server. One caller at a time now: a thread the barrier waits for skips
+	// if it loses the race (the running save reschedules the periodic task when it finishes); any other thread holds
+	// no block mutex and waits its turn as before.
+	Thread* thread = Thread::getCurrentThread();
+	TaskWorkerThread* worker = thread != nullptr ? thread->asTaskWorkerThread() : nullptr;
+	const bool mayWait = worker != nullptr ? !worker->doBlockWorkerDuringSave() : dynamic_cast<TaskScheduler*>(thread) == nullptr;
+
+	while (!DOB::backupStarting.compareAndSet(false, true)) {
+		if (!mayWait) {
+			warning() << "another backup is starting on another thread, skipping this one";
+			return;
+		}
+
+		Thread::sleep(10);
+	}
+
+	try {
+		ObjectBrokerDirector::instance()->createBackup(flags);
+	} catch (...) {
+		DOB::backupStarting = false;
+		throw;
+	}
+
+	DOB::backupStarting = false;
 }
 
 int DOBObjectManager::updatePersistentObject(DistributedObject* object) {
@@ -1123,6 +1155,12 @@ void DOBObjectManager::checkCommitedObjects() {
 }
 
 void DOBObjectManager::finishObjectUpdate() {
+	// Outer Rim: finishBackup() takes the broker director lock (setState -> handleStateUpdate). Report it before this
+	// lock is taken and before objectUpdateInProgress clears: a save that holds the director then still stops at
+	// "already updating", instead of waiting on this lock (updateModifiedObjectsToDatabase) or on the commit thread's
+	// blockMutex (startWatch) while this thread waits on the director.
+	ObjectBrokerAgent::instance()->finishBackup();
+
 	Locker _locker(this);
 
 	objectUpdateInProgress = false;
@@ -1133,8 +1171,6 @@ void DOBObjectManager::finishObjectUpdate() {
 			<< " commited objects: " << totalActuallyChangedObjects;
 
 	saveCount++;
-
-	ObjectBrokerAgent::instance()->finishBackup();
 }
 
 void DOBObjectManager::scheduleUpdateToDatabase() {
