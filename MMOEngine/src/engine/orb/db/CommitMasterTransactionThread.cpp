@@ -38,12 +38,15 @@ void CommitMasterTransactionThread::startWatch(engine::db::berkeley::Transaction
 	fatal(workers != nullptr) << "workers is null";
 	fatal(objectsToCollect != nullptr) << "objectsToCollect is null";
 
+	// Outer Rim: publish the job under blockMutex. commitData() ends in finishObjectUpdate(), which lets the next save
+	// start while run() still holds this mutex and has yet to clear the finished job; fields written before taking
+	// the lock were then wiped by that cleanup, and the next commit ran with a null worker vector.
+	blockMutex.lock();
+
 	transaction = trans;
 	threads = workers;
 	numberOfThreads = number;
 	objectsToDeleteFromRam = objectsToCollect;
-
-	blockMutex.lock();
 
 	waitCondition.signal(&blockMutex);
 
@@ -54,7 +57,10 @@ void CommitMasterTransactionThread::run() {
 	while (doRun) {
 		blockMutex.lock();
 
-		waitCondition.wait(&blockMutex);
+		// Outer Rim: wait for a published job, not just a wakeup (a spurious or stale one must not commit nothing).
+		while (doRun && threads == nullptr) {
+			waitCondition.wait(&blockMutex);
+		}
 
 		if (doRun) {
 			commitData();
@@ -62,6 +68,7 @@ void CommitMasterTransactionThread::run() {
 
 		transaction = nullptr;
 		threads = nullptr;
+		numberOfThreads = 0;
 		objectsToDeleteFromRam = nullptr;
 
 		blockMutex.unlock();
