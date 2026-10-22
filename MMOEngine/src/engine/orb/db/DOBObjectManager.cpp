@@ -469,6 +469,15 @@ void DOBObjectManager::updateModifiedObjectsToDatabase(int flags) {
 
 	if (dumpRunning) {
 		error() << "dumpRAMtoJSON running, please try again later.";
+
+		// Outer Rim: the JSON dump outlives the save that started it, and that save's finishObjectUpdate has already
+		// scheduled the periodic save. When this is that periodic save, returning here stopped autosave for good: only
+		// finishObjectUpdate reschedules it. Try again in one interval. A manual save leaves the periodic one queued.
+		Locker locker(this);
+
+		if (!updateModifiedObjectsTask->isScheduled())
+			updateModifiedObjectsTask->schedule(UPDATETODATABASETIME);
+
 		return;
 	}
 
