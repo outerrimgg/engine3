@@ -20,6 +20,8 @@
 
 #include "system/lang/Math.h"
 
+#include <cxxabi.h>
+
 #include <chrono>
 #include <condition_variable>
 #include <functional>
@@ -359,11 +361,24 @@ namespace {
 		}
 	};
 
-	String describeBarrierHolder(const char* kind, const String& name, uint32 threadNumber, Task* task) {
+	// getTaskName() is a typeid name for most tasks (N3pit12_GLOBAL__N_17UiPulseE): demangle it so the log reads.
+	String demangledTaskName(const char* name) {
+		int status = 0;
+		char* demangled = abi::__cxa_demangle(name, nullptr, nullptr, &status);
+
+		String result = (status == 0 && demangled != nullptr) ? String(demangled) : String(name);
+
+		free(demangled);
+
+		return result;
+	}
+
+	String describeBarrierHolder(const char* kind, const String& customName, const String& name, uint32 threadNumber, Task* task) {
 		const char* taskName = task != nullptr ? task->getTaskName() : nullptr;
 
 		StringBuffer msg;
-		msg << kind << " '" << name << "' (thread " << threadNumber << ") running task '" << (taskName != nullptr ? taskName : (task != nullptr ? "<unnamed>" : "<none>")) << "'";
+		msg << kind << " '" << (customName.isEmpty() ? name : customName) << "' (thread " << threadNumber << ") running task '"
+			<< (taskName != nullptr ? demangledTaskName(taskName) : String(task != nullptr ? "<unnamed>" : "<none>")) << "'";
 
 		return msg.toString();
 	}
@@ -403,7 +418,7 @@ Vector<Pair<Locker*, TaskWorkerThread*>>* TaskManagerImpl::blockTaskManager() {
 		Mutex* blockMutex = worker->getBlockMutex();
 
 		barrierWatch.waitingOn([worker] {
-			return describeBarrierHolder("worker", worker->getName(), worker->getThreadNumber(), worker->getCurrentTask());
+			return describeBarrierHolder("worker", worker->getCustomThreadName(), worker->getName(), worker->getThreadNumber(), worker->getCurrentTask());
 		});
 
 		Locker* locker = new Locker(blockMutex);
@@ -424,7 +439,7 @@ Vector<Pair<Locker*, TaskWorkerThread*>>* TaskManagerImpl::blockTaskManager() {
 		Mutex* blockMutex = scheduler->getBlockMutex();
 
 		barrierWatch.waitingOn([scheduler] {
-			return describeBarrierHolder("scheduler", scheduler->Thread::getName(), scheduler->getThreadNumber(), scheduler->getCurrentTask());
+			return describeBarrierHolder("scheduler", scheduler->getCustomThreadName(), scheduler->Thread::getName(), scheduler->getThreadNumber(), scheduler->getCurrentTask());
 		});
 
 		Locker* locker = new Locker(blockMutex);
@@ -445,7 +460,7 @@ Vector<Pair<Locker*, TaskWorkerThread*>>* TaskManagerImpl::blockTaskManager() {
 		Mutex* blockMutex = scheduler->getBlockMutex();
 
 		barrierWatch.waitingOn([scheduler] {
-			return describeBarrierHolder("scheduler", scheduler->Thread::getName(), scheduler->getThreadNumber(), scheduler->getCurrentTask());
+			return describeBarrierHolder("scheduler", scheduler->getCustomThreadName(), scheduler->Thread::getName(), scheduler->getThreadNumber(), scheduler->getCurrentTask());
 		});
 
 		Locker* locker = new Locker(blockMutex);
