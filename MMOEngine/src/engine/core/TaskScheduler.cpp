@@ -18,6 +18,8 @@ TaskScheduler::TaskScheduler() : Thread(), Logger("TaskScheduler") {
 
 	pause = false;
 
+	currentTask = nullptr;
+
 	tasks.setTaskScheduler(this);
 
 	tasks.setLoggingName("TaskQueue");
@@ -35,6 +37,8 @@ TaskScheduler::TaskScheduler(const String& s) : Thread(s), Logger(s) {
 	doRun = false;
 
 	pause = false;
+
+	currentTask = nullptr;
 
 	startTime.updateToCurrentTime();
 
@@ -87,6 +91,8 @@ void TaskScheduler::run() {
 			continue;
 		}
 
+		currentTask = task;
+
 		try {
 			if (!task->doRunInScheduler()) {
 				task->execute();
@@ -100,6 +106,8 @@ void TaskScheduler::run() {
 		} catch (...) {
 			error("[TaskScheduler] unreported Exception caught");
 		}
+
+		currentTask = nullptr;
 
 		blockMutex.unlock();
 

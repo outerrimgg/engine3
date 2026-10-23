@@ -30,6 +30,9 @@ namespace engine {
 
 		Mutex blockMutex;
 
+		// Outer Rim: what the scheduler is executing right now, for the save-barrier diagnostics in TaskManagerImpl.
+		Task* currentTask;
+
 		HashTable<String, uint64> tasksCount;
 		ReadWriteLock tasksCountGuard;
 		AtomicBoolean pause;
@@ -50,6 +53,10 @@ namespace engine {
 		void stop();
 
 		void setPause(bool val);
+
+		inline Task* getCurrentTask() const {
+			return currentTask;
+		}
 
 		bool scheduleTask(Task* task, uint64 delay = 0);
 		bool scheduleTask(Task* task, const Time& time);

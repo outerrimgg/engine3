@@ -20,6 +20,12 @@
 
 #include "system/lang/Math.h"
 
+#include <chrono>
+#include <condition_variable>
+#include <functional>
+#include <mutex>
+#include <thread>
+
 int TaskManagerImpl::BASECLIENT_WORKER_THREADS = 8;
 
 int TaskManagerImpl::DEFAULT_WORKER_QUEUES = 0;
@@ -288,12 +294,91 @@ void TaskManagerImpl::initalizeDatabaseHandles() {
 	}
 }
 
+namespace {
+	// Outer Rim: the save barrier in blockTaskManager() waits on every blocking worker's and scheduler's blockMutex,
+	// and a thread holds its blockMutex for as long as it runs a task. One task that never returns therefore freezes
+	// the whole game side: 2026-10-23 12:00:58 logged "starting delta save", never "waited for task manager to stop",
+	// and the world sat dead until it was killed by hand - with no record of which thread the barrier was waiting on.
+	// This watcher changes nothing about the wait. From a second thread it names, every warnSeconds, whoever the
+	// barrier is still blocked on (thread, running task), so a hang leaves its culprit in the log.
+	// The task pointer is read racily on purpose: it is only read after the barrier has already been stuck for
+	// warnSeconds, and a task that finished in that instant is the only way the read can go stale.
+	class SaveBarrierWatch {
+		const Logger& log;
+		const int warnSeconds;
+
+		std::mutex mtx;
+		std::condition_variable cv;
+		bool done;
+		std::function<String()> describe;
+		std::thread watcher;
+
+		void watch() {
+			const auto start = std::chrono::steady_clock::now();
+
+			std::unique_lock<std::mutex> lk(mtx);
+
+			while (!done) {
+				if (cv.wait_for(lk, std::chrono::seconds(warnSeconds), [this] { return done; }))
+					break;
+
+				const auto waited = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - start).count();
+
+				StringBuffer msg;
+				msg << "SAVE BARRIER STUCK: waited " << (int64) waited << "s for the task manager to stop; still blocked on "
+					<< (describe ? describe() : String("(nothing yet)"));
+
+				log.info(msg, true);
+			}
+		}
+
+	public:
+		SaveBarrierWatch(const Logger& logger, int seconds) : log(logger), warnSeconds(seconds), done(false) {
+			if (warnSeconds > 0)
+				watcher = std::thread([this] { watch(); });
+		}
+
+		~SaveBarrierWatch() {
+			{
+				std::lock_guard<std::mutex> lk(mtx);
+				done = true;
+			}
+
+			cv.notify_all();
+
+			if (watcher.joinable())
+				watcher.join();
+		}
+
+		SaveBarrierWatch(const SaveBarrierWatch&) = delete;
+		SaveBarrierWatch& operator=(const SaveBarrierWatch&) = delete;
+
+		void waitingOn(std::function<String()> what) {
+			std::lock_guard<std::mutex> lk(mtx);
+			describe = std::move(what);
+		}
+	};
+
+	String describeBarrierHolder(const char* kind, const String& name, uint32 threadNumber, Task* task) {
+		const char* taskName = task != nullptr ? task->getTaskName() : nullptr;
+
+		StringBuffer msg;
+		msg << kind << " '" << name << "' (thread " << threadNumber << ") running task '" << (taskName != nullptr ? taskName : (task != nullptr ? "<unnamed>" : "<none>")) << "'";
+
+		return msg.toString();
+	}
+}
+
 Vector<Pair<Locker*, TaskWorkerThread*>>* TaskManagerImpl::blockTaskManager() {
 	//Locker locker(this);
 
 	debug("blocking task manager");
 
 	auto lockers = new Vector<Pair<Locker*, TaskWorkerThread*>>();
+
+	static const int barrierWarnSeconds = Core::getIntProperty("TaskManager.saveBarrierWarnSeconds", 15);
+
+	SaveBarrierWatch barrierWatch(*this, barrierWarnSeconds);
 
 	//signal pause
 	for (int i = 0; i < workers.size(); ++i) {
@@ -317,6 +402,10 @@ Vector<Pair<Locker*, TaskWorkerThread*>>* TaskManagerImpl::blockTaskManager() {
 
 		Mutex* blockMutex = worker->getBlockMutex();
 
+		barrierWatch.waitingOn([worker] {
+			return describeBarrierHolder("worker", worker->getName(), worker->getThreadNumber(), worker->getCurrentTask());
+		});
+
 		Locker* locker = new Locker(blockMutex);
 		lockers->emplace(locker, worker);
 
@@ -334,6 +423,10 @@ Vector<Pair<Locker*, TaskWorkerThread*>>* TaskManagerImpl::blockTaskManager() {
 
 		Mutex* blockMutex = scheduler->getBlockMutex();
 
+		barrierWatch.waitingOn([scheduler] {
+			return describeBarrierHolder("scheduler", scheduler->Thread::getName(), scheduler->getThreadNumber(), scheduler->getCurrentTask());
+		});
+
 		Locker* locker = new Locker(blockMutex);
 		lockers->emplace(locker, nullptr);
 
@@ -350,6 +443,10 @@ Vector<Pair<Locker*, TaskWorkerThread*>>* TaskManagerImpl::blockTaskManager() {
 		TaskScheduler* scheduler = ioSchedulers.get(i);
 
 		Mutex* blockMutex = scheduler->getBlockMutex();
+
+		barrierWatch.waitingOn([scheduler] {
+			return describeBarrierHolder("scheduler", scheduler->Thread::getName(), scheduler->getThreadNumber(), scheduler->getCurrentTask());
+		});
 
 		Locker* locker = new Locker(blockMutex);
 		lockers->emplace(locker, nullptr);
