@@ -157,7 +157,10 @@ void TaskWorkerThread::run() {
 	//	modifiedObjects.removeRange(0, modifiedObjects.size());
 
 		try {
-			currentTask = task;
+			{
+				std::lock_guard<std::mutex> lk(currentTaskMutex);
+				currentTask = task;
+			}
 
 			task->doExecute();
 		} catch (const Exception& e) {
@@ -166,7 +169,10 @@ void TaskWorkerThread::run() {
 			error("unreported Exception caught");
 		}
 
-		currentTask = nullptr;
+		{
+			std::lock_guard<std::mutex> lk(currentTaskMutex);
+			currentTask = nullptr;
+		}
 
 		uint64 elapsedTime = task->getLastElapsedTime();
 
@@ -455,4 +461,16 @@ void TaskWorkerThread::setPause(bool val) {
 	if (val) {
 		queue->wake();
 	}
+}
+
+String TaskWorkerThread::getCurrentTaskName() const {
+	std::lock_guard<std::mutex> lk(currentTaskMutex);
+
+	if (currentTask == nullptr) {
+		return String();
+	}
+
+	const char* name = currentTask->getTaskName();
+
+	return name != nullptr ? String(name) : String("<unnamed>");
 }

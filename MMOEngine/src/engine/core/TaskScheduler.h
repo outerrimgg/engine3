@@ -9,6 +9,7 @@
 #include "system/lang.h"
 
 #include <atomic>
+#include <mutex>
 
 #include "system/util/SynchronizedHashTable.h"
 
@@ -32,6 +33,7 @@ namespace engine {
 
 		// Outer Rim: what the scheduler is executing right now, for the save-barrier diagnostics in TaskManagerImpl.
 		Task* currentTask;
+		mutable std::mutex currentTaskMutex;
 
 		HashTable<String, uint64> tasksCount;
 		ReadWriteLock tasksCountGuard;
@@ -57,6 +59,10 @@ namespace engine {
 		inline Task* getCurrentTask() const {
 			return currentTask;
 		}
+
+		// Outer Rim: the running task's name, copied - safe from another thread (the save-barrier watcher). The owner
+		// sets and clears currentTask under currentTaskMutex while it still holds the task, so it cannot be freed here.
+		String getCurrentTaskName() const;
 
 		bool scheduleTask(Task* task, uint64 delay = 0);
 		bool scheduleTask(Task* task, const Time& time);

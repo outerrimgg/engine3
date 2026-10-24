@@ -91,7 +91,10 @@ void TaskScheduler::run() {
 			continue;
 		}
 
-		currentTask = task;
+		{
+			std::lock_guard<std::mutex> lk(currentTaskMutex);
+			currentTask = task;
+		}
 
 		try {
 			if (!task->doRunInScheduler()) {
@@ -107,7 +110,10 @@ void TaskScheduler::run() {
 			error("[TaskScheduler] unreported Exception caught");
 		}
 
-		currentTask = nullptr;
+		{
+			std::lock_guard<std::mutex> lk(currentTaskMutex);
+			currentTask = nullptr;
+		}
 
 		blockMutex.unlock();
 
@@ -194,4 +200,16 @@ HashTable<String, uint64> TaskScheduler::getTasksCount() {
 	auto copy = tasksCount;
 
 	return copy;
+}
+
+String TaskScheduler::getCurrentTaskName() const {
+	std::lock_guard<std::mutex> lk(currentTaskMutex);
+
+	if (currentTask == nullptr) {
+		return String();
+	}
+
+	const char* name = currentTask->getTaskName();
+
+	return name != nullptr ? String(name) : String("<unnamed>");
 }

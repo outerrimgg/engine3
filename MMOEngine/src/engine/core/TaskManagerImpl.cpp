@@ -303,8 +303,9 @@ namespace {
 	// and the world sat dead until it was killed by hand - with no record of which thread the barrier was waiting on.
 	// This watcher changes nothing about the wait. From a second thread it names, every warnSeconds, whoever the
 	// barrier is still blocked on (thread, running task), so a hang leaves its culprit in the log.
-	// The task pointer is read racily on purpose: it is only read after the barrier has already been stuck for
-	// warnSeconds, and a task that finished in that instant is the only way the read can go stale.
+	// The running task is read through getCurrentTaskName(), which copies the name under the owner thread's
+	// currentTaskMutex (a raw read could hit a task freed in that instant). The log write happens with mtx released,
+	// so a slow console or log file never holds up waitingOn() and the barrier itself.
 	class SaveBarrierWatch {
 		const Logger& log;
 		const int warnSeconds;
@@ -326,11 +327,17 @@ namespace {
 
 				const auto waited = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - start).count();
 
+				std::function<String()> what = describe;
+
+				lk.unlock();
+
 				StringBuffer msg;
 				msg << "SAVE BARRIER STUCK: waited " << (int64) waited << "s for the task manager to stop; still blocked on "
-					<< (describe ? describe() : String("(nothing yet)"));
+					<< (what ? what() : String("(nothing yet)"));
 
 				log.info(msg, true);
+
+				lk.lock();
 			}
 		}
 
@@ -373,12 +380,10 @@ namespace {
 		return result;
 	}
 
-	String describeBarrierHolder(const char* kind, const String& customName, const String& name, uint32 threadNumber, Task* task) {
-		const char* taskName = task != nullptr ? task->getTaskName() : nullptr;
-
+	String describeBarrierHolder(const char* kind, const String& customName, const String& name, uint32 threadNumber, const String& taskName) {
 		StringBuffer msg;
 		msg << kind << " '" << (customName.isEmpty() ? name : customName) << "' (thread " << threadNumber << ") running task '"
-			<< (taskName != nullptr ? demangledTaskName(taskName) : String(task != nullptr ? "<unnamed>" : "<none>")) << "'";
+			<< (taskName.isEmpty() ? String("<none>") : demangledTaskName(taskName.toCharArray())) << "'";
 
 		return msg.toString();
 	}
@@ -418,7 +423,7 @@ Vector<Pair<Locker*, TaskWorkerThread*>>* TaskManagerImpl::blockTaskManager() {
 		Mutex* blockMutex = worker->getBlockMutex();
 
 		barrierWatch.waitingOn([worker] {
-			return describeBarrierHolder("worker", worker->getCustomThreadName(), worker->getName(), worker->getThreadNumber(), worker->getCurrentTask());
+			return describeBarrierHolder("worker", worker->getCustomThreadName(), worker->getName(), worker->getThreadNumber(), worker->getCurrentTaskName());
 		});
 
 		Locker* locker = new Locker(blockMutex);
@@ -439,7 +444,7 @@ Vector<Pair<Locker*, TaskWorkerThread*>>* TaskManagerImpl::blockTaskManager() {
 		Mutex* blockMutex = scheduler->getBlockMutex();
 
 		barrierWatch.waitingOn([scheduler] {
-			return describeBarrierHolder("scheduler", scheduler->getCustomThreadName(), scheduler->Thread::getName(), scheduler->getThreadNumber(), scheduler->getCurrentTask());
+			return describeBarrierHolder("scheduler", scheduler->getCustomThreadName(), scheduler->Thread::getName(), scheduler->getThreadNumber(), scheduler->getCurrentTaskName());
 		});
 
 		Locker* locker = new Locker(blockMutex);
@@ -460,7 +465,7 @@ Vector<Pair<Locker*, TaskWorkerThread*>>* TaskManagerImpl::blockTaskManager() {
 		Mutex* blockMutex = scheduler->getBlockMutex();
 
 		barrierWatch.waitingOn([scheduler] {
-			return describeBarrierHolder("scheduler", scheduler->getCustomThreadName(), scheduler->Thread::getName(), scheduler->getThreadNumber(), scheduler->getCurrentTask());
+			return describeBarrierHolder("scheduler", scheduler->getCustomThreadName(), scheduler->Thread::getName(), scheduler->getThreadNumber(), scheduler->getCurrentTaskName());
 		});
 
 		Locker* locker = new Locker(blockMutex);

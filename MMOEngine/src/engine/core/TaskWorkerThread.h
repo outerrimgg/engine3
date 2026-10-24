@@ -10,6 +10,8 @@
 
 #include "RunStatistics.h"
 
+#include <mutex>
+
 namespace engine {
   namespace core {
 
@@ -29,6 +31,7 @@ namespace engine {
 		AtomicBoolean initializeDBHandles;
 
 		Task* currentTask;
+		mutable std::mutex currentTaskMutex;
 
 		uint64 mutexWaitTime;
 		uint64 mutexesAcquired;
@@ -124,6 +127,10 @@ namespace engine {
 		inline Task* getCurrentTask() const {
 			return currentTask;
 		}
+
+		// Outer Rim: the running task's name, copied - safe from another thread (the save-barrier watcher). The owner
+		// sets and clears currentTask under currentTaskMutex while it still holds the task, so it cannot be freed here.
+		String getCurrentTaskName() const;
 
 	};
 
