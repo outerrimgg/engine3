@@ -75,6 +75,17 @@ namespace sys {
 	   	   return vector;
 	   }
 
+	   // Outer Rim: calls f(element) for each element under the read lock - one consistent walk, which size() + get(i)
+	   // (two separate locks) is not while another thread drops elements. f must not modify this vector.
+	   template<typename F>
+	   void forEachLocked(F f) const {
+		   ReadLocker locker(&guard);
+
+		   for (int i = 0; i < vector.size(); ++i) {
+			   f(vector.getUnsafe(i));
+		   }
+	   }
+
 	   int size() const {
 #ifdef ATOMIC_SYNC_VECTOR_COUNT
 		   return count;
