@@ -9,6 +9,7 @@
 #include "LuaFunction.h"
 #include "Lua.h"
 #include "LuaPanicException.h"
+#include "LuaCallScope.h"
 
 #ifdef CXX11_COMPILER
 #include <chrono>
@@ -142,6 +143,7 @@ void LuaFunction::operator<<(void* ptr) {
 
 lua_State* LuaFunction::callFunction() {
 	try {
+		LuaCallScope scope(getLuaState());
 #ifdef COLLECT_TASKSTATISTICS
 #ifdef CXX11_COMPILER
 		auto start = std::chrono::high_resolution_clock::now();

@@ -8,6 +8,7 @@
 #include "Lua.h"
 
 #include "LuaPanicException.h"
+#include "LuaCallScope.h"
 
 #include "system/lang/Exception.h"
 
@@ -114,6 +115,7 @@ bool Lua::runFile(const String& filename) {
 
 	try {
 
+		LuaCallScope scope(L);
 		if (luaL_loadfile(L, filename.toCharArray()) || lua_pcall(L, 0, 0, 0)) {
 			const char* err = lua_tostring(L, -1);
 
@@ -138,6 +140,7 @@ bool Lua::runFile(const String& filename, lua_State* lState) {
 		if (!filename.isEmpty()) {
 			logger.debug() << "Loading lua file: " << filename;
 
+			LuaCallScope scope(lState);
 			if (luaL_loadfile(lState, filename.toCharArray()) || lua_pcall(lState, 0, 0, 0)) {
 				const char* err = lua_tostring(lState, -1);
 
@@ -168,6 +171,7 @@ bool Lua::runString(const String& str) {
 		init();
 
 	try {
+		LuaCallScope scope(L);
 		if (luaL_loadbuffer(L, str.toCharArray(), str.length(), "command") || lua_pcall(L, 0, 0, 0)) {
 			const char* err = lua_tostring(L, -1);
 

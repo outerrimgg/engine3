@@ -6,6 +6,7 @@
 #define LUNAR_H
 
 #include "lua.hpp"
+#include "LuaCallScope.h"
 
 namespace engine {
 namespace lua {
@@ -64,6 +65,7 @@ public:
 	static int call(lua_State *L, const char *method,
 			int nargs=0, int nresults=LUA_MULTRET, int errfunc=0)
 	{
+		LuaCallScope scope(L);
 		int base = lua_gettop(L) - nargs;  // userdata index
 		if (!luaL_checkudata(L, base, T::className)) {
 			lua_settop(L, base-1);           // drop userdata and args
