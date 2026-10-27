@@ -306,44 +306,127 @@ namespace {
 	// The running task is read through getCurrentTaskName(), which copies the name under the owner thread's
 	// currentTaskMutex (a raw read could hit a task freed in that instant). The log write happens with mtx released,
 	// so a slow console or log file never holds up waitingOn() and the barrier itself.
+	// 2026-10-26: saves that wait 0.5-1.7 s (no hang) queue movement and snap players back, so any single holder that
+	// keeps the barrier waiting slowMs or longer is also named, once, with how long it held it: "SAVE BARRIER SLOW".
+	// The name is taken at the slowMs mark, while that task is still running.
 	class SaveBarrierWatch {
+		using Clock = std::chrono::steady_clock;
+
 		const Logger& log;
 		const int warnSeconds;
+		const int slowMs;
 
 		std::mutex mtx;
 		std::condition_variable cv;
 		bool done;
+		Clock::time_point doneAt;
 		std::function<String()> describe;
+		uint32 holder; // bumped by every waitingOn()
+		Clock::time_point holderSince;
+		uint32 slowHolder; // holder named as slow; its release time is stamped by waitingOn() or the destructor
+		bool slowReleased;
+		Clock::time_point slowReleasedAt;
 		std::thread watcher;
 
+		static int64 millisBetween(Clock::time_point from, Clock::time_point to) {
+			return std::chrono::duration_cast<std::chrono::milliseconds>(to - from).count();
+		}
+
+		// Called with mtx held, by whoever ends the current holder's wait.
+		void endHolder(Clock::time_point at) {
+			if (slowHolder != 0 && holder == slowHolder && !slowReleased) {
+				slowReleased = true;
+				slowReleasedAt = at;
+			}
+		}
+
 		void watch() {
-			const auto start = std::chrono::steady_clock::now();
+			const auto start = Clock::now();
+			auto nextStuck = start + std::chrono::seconds(warnSeconds);
+			const auto tick = slowMs > 0 ? std::chrono::milliseconds(100) : std::chrono::milliseconds(warnSeconds * 1000);
+
+			uint32 namedHolder = 0;
+			Clock::time_point slowSince;
+			String slowWhat;
 
 			std::unique_lock<std::mutex> lk(mtx);
 
-			while (!done) {
-				if (cv.wait_for(lk, std::chrono::seconds(warnSeconds), [this] { return done; }))
-					break;
+			while (true) {
+				const bool finished = cv.wait_for(lk, tick, [this] { return done; });
+				const auto now = Clock::now();
 
-				const auto waited = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - start).count();
+				Vector<String> lines;
 
-				std::function<String()> what = describe;
+				if (slowHolder != 0 && slowReleased) {
+					StringBuffer msg;
+					msg << "SAVE BARRIER SLOW: blocked " << millisBetween(slowSince, slowReleasedAt) << " ms on " << slowWhat;
+					lines.add(msg.toString());
+
+					slowHolder = 0;
+					slowReleased = false;
+				}
+
+				std::function<String()> slowDescribe;
+				std::function<String()> stuckDescribe;
+				const uint32 current = holder;
+				const auto currentSince = holderSince;
+
+				if (!finished && slowMs > 0 && describe && current != namedHolder && millisBetween(currentSince, now) >= slowMs)
+					slowDescribe = describe;
+
+				const bool stuck = !finished && warnSeconds > 0 && now >= nextStuck;
+
+				if (stuck) {
+					stuckDescribe = describe;
+					nextStuck += std::chrono::seconds(warnSeconds);
+				}
 
 				lk.unlock();
 
-				StringBuffer msg;
-				msg << "SAVE BARRIER STUCK: waited " << (int64) waited << "s for the task manager to stop; still blocked on "
-					<< (what ? what() : String("(nothing yet)"));
+				if (slowDescribe)
+					slowWhat = slowDescribe();
 
-				log.info(msg, true);
+				if (stuck) {
+					StringBuffer msg;
+					msg << "SAVE BARRIER STUCK: waited " << (int64) std::chrono::duration_cast<std::chrono::seconds>(now - start).count()
+						<< "s for the task manager to stop; still blocked on " << (stuckDescribe ? stuckDescribe() : String("(nothing yet)"));
+					lines.add(msg.toString());
+				}
+
+				for (int i = 0; i < lines.size(); ++i)
+					log.info(lines.get(i), true);
 
 				lk.lock();
+
+				if (slowDescribe) {
+					namedHolder = current;
+					slowSince = currentSince;
+					slowHolder = current;
+					slowReleased = false;
+
+					// It may have let go while it was being named: the next holder's start is its release, if only one
+					// came after it; otherwise "now" is an upper bound.
+					if (holder != current) {
+						slowReleased = true;
+						slowReleasedAt = holder == current + 1 ? holderSince : Clock::now();
+					} else if (done) {
+						slowReleased = true;
+						slowReleasedAt = doneAt;
+					}
+
+					if (slowReleased)
+						continue; // report it on the next pass, even if the barrier has finished
+				}
+
+				if (finished)
+					break;
 			}
 		}
 
 	public:
-		SaveBarrierWatch(const Logger& logger, int seconds) : log(logger), warnSeconds(seconds), done(false) {
-			if (warnSeconds > 0)
+		SaveBarrierWatch(const Logger& logger, int seconds, int slowMillis) : log(logger), warnSeconds(seconds), slowMs(slowMillis),
+				done(false), holder(0), slowHolder(0), slowReleased(false) {
+			if (warnSeconds > 0 || slowMs > 0)
 				watcher = std::thread([this] { watch(); });
 		}
 
@@ -351,6 +434,8 @@ namespace {
 			{
 				std::lock_guard<std::mutex> lk(mtx);
 				done = true;
+				doneAt = Clock::now();
+				endHolder(doneAt);
 			}
 
 			cv.notify_all();
@@ -364,7 +449,11 @@ namespace {
 
 		void waitingOn(std::function<String()> what) {
 			std::lock_guard<std::mutex> lk(mtx);
+			const auto now = Clock::now();
+			endHolder(now);
 			describe = std::move(what);
+			++holder;
+			holderSince = now;
 		}
 	};
 
@@ -397,8 +486,9 @@ Vector<Pair<Locker*, TaskWorkerThread*>>* TaskManagerImpl::blockTaskManager() {
 	auto lockers = new Vector<Pair<Locker*, TaskWorkerThread*>>();
 
 	static const int barrierWarnSeconds = Core::getIntProperty("TaskManager.saveBarrierWarnSeconds", 15);
+	static const int barrierSlowMs = Core::getIntProperty("TaskManager.saveBarrierSlowMs", 500);
 
-	SaveBarrierWatch barrierWatch(*this, barrierWarnSeconds);
+	SaveBarrierWatch barrierWatch(*this, barrierWarnSeconds, barrierSlowMs);
 
 	//signal pause
 	for (int i = 0; i < workers.size(); ++i) {
