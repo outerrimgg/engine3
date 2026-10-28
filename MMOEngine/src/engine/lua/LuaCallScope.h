@@ -6,10 +6,54 @@
 #pragma once
 
 #include <lua.hpp>
+#include <atomic>
 #include <cstdio>
 
 namespace engine {
 namespace lua {
+
+// Outer Rim: each Lua VM's own heap accounting (lua_gc LUA_GCCOUNT, O(1)) as of the end of its last outermost call,
+// so total and per-VM Lua memory can be read from another thread without touching any VM. Fixed size; a VM gets a
+// slot when its scope context is created, and VMs past MAX_SLOTS are only counted. Closed VMs keep their last value.
+class LuaHeapSamples {
+public:
+	static const int MAX_SLOTS = 256;
+
+	struct Slot {
+		std::atomic<unsigned long long> bytes;
+		std::atomic<unsigned long long> peak;
+		std::atomic<unsigned long long> calls;
+	};
+
+	static Slot* slots() {
+		static Slot table[MAX_SLOTS] = {};
+		return table;
+	}
+
+	static std::atomic<int>& assigned() {
+		static std::atomic<int> count{0};
+		return count;
+	}
+
+	static int assign() {
+		return assigned().fetch_add(1);
+	}
+
+	static void record(int slot, lua_State* L) {
+		if (slot < 0 || slot >= MAX_SLOTS)
+			return;
+
+		const unsigned long long bytes = ((unsigned long long) lua_gc(L, LUA_GCCOUNT, 0) << 10) + (unsigned long long) lua_gc(L, LUA_GCCOUNTB, 0);
+		Slot& entry = slots()[slot];
+		entry.bytes.store(bytes, std::memory_order_relaxed);
+		entry.calls.fetch_add(1, std::memory_order_relaxed);
+
+		unsigned long long peak = entry.peak.load(std::memory_order_relaxed);
+
+		while (bytes > peak && !entry.peak.compare_exchange_weak(peak, bytes, std::memory_order_relaxed)) {
+		}
+	}
+};
 
 // Lifetime of borrowed, cached binding objects is one outermost protected Lua
 // invocation. The registry is shared by coroutines, unlike lua_State itself.
@@ -21,6 +65,7 @@ class LuaCallScope {
 		lua_CFunction cleanup;
 		bool cleaning;
 		bool reentered;
+		int heapSlot;
 	};
 
 	lua_State* state;
@@ -38,7 +83,7 @@ class LuaCallScope {
 		if (context == nullptr) {
 			lua_pop(L, 1);
 			context = static_cast<Context*>(lua_newuserdata(L, sizeof(Context)));
-			*context = {0, 0, nullptr, false, false};
+			*context = {0, 0, nullptr, false, false, LuaHeapSamples::assign()};
 			lua_pushvalue(L, -1);
 			lua_rawsetp(L, LUA_REGISTRYINDEX, registryKey());
 		}
@@ -67,6 +112,9 @@ public:
 	}
 
 	~LuaCallScope() noexcept {
+		if (context->depth == 1 && !context->cleaning)
+			LuaHeapSamples::record(context->heapSlot, state);
+
 		if (--context->depth != 0 || context->cleaning || context->cleanup == nullptr)
 			return;
 
