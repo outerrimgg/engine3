@@ -9,6 +9,7 @@
 #include "engine/service/ServiceThread.h"
 
 #include "RunStatistics.h"
+#include "TaskExecutionTracker.h"
 
 #include <mutex>
 
@@ -32,6 +33,7 @@ namespace engine {
 
 		Task* currentTask;
 		mutable std::mutex currentTaskMutex;
+		TaskExecutionTracker executionTracker;
 
 		uint64 mutexWaitTime;
 		uint64 mutexesAcquired;
@@ -131,6 +133,14 @@ namespace engine {
 		// Outer Rim: the running task's name, copied - safe from another thread (the save-barrier watcher). The owner
 		// sets and clears currentTask under currentTaskMutex while it still holds the task, so it cannot be freed here.
 		String getCurrentTaskName() const;
+
+		// Outer Rim: the running task's raw name and its execution state, read together under currentTaskMutex.
+		void getCurrentExecution(String& taskName, TaskExecutionTracker::Execution& execution) const;
+
+		// Outer Rim: the finished execution with this number, if it is still this thread's last one.
+		bool getCompletedExecution(uint64 executionId, TaskExecutionTracker::Execution& execution) const {
+			return executionTracker.copyCompleted(executionId, execution);
+		}
 
 	};
 

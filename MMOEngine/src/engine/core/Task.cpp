@@ -110,10 +110,15 @@ void Task::doExecute() {
 		Logger::console.error("in TASK");
 	}
 #else
+	TaskExecutionTracker::Scope trackerScope;
+	TaskExecutionTracker::enter(TaskExecutionTracker::SETUP);
+
 	ObjectDatabaseManager::instance()->startLocalTransaction();
 
 	Timer executionTimer;
 	executionTimer.start();
+
+	TaskExecutionTracker::enter(TaskExecutionTracker::RUN);
 
 	try {
 		run();
@@ -126,7 +131,11 @@ void Task::doExecute() {
 
 	lastElapsedTime = executionTimer.stop();
 
+	TaskExecutionTracker::enter(TaskExecutionTracker::COMMIT);
+
 	ObjectDatabaseManager::instance()->commitLocalTransaction();
+
+	TaskExecutionTracker::enter(TaskExecutionTracker::FINISH);
 #endif
 }
 

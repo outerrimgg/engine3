@@ -34,6 +34,7 @@ namespace engine {
 		// Outer Rim: what the scheduler is executing right now, for the save-barrier diagnostics in TaskManagerImpl.
 		Task* currentTask;
 		mutable std::mutex currentTaskMutex;
+		TaskExecutionTracker executionTracker;
 
 		HashTable<String, uint64> tasksCount;
 		ReadWriteLock tasksCountGuard;
@@ -63,6 +64,14 @@ namespace engine {
 		// Outer Rim: the running task's name, copied - safe from another thread (the save-barrier watcher). The owner
 		// sets and clears currentTask under currentTaskMutex while it still holds the task, so it cannot be freed here.
 		String getCurrentTaskName() const;
+
+		// Outer Rim: the running task's raw name and its execution state, read together under currentTaskMutex.
+		void getCurrentExecution(String& taskName, TaskExecutionTracker::Execution& execution) const;
+
+		// Outer Rim: the finished execution with this number, if it is still this thread's last one.
+		bool getCompletedExecution(uint64 executionId, TaskExecutionTracker::Execution& execution) const {
+			return executionTracker.copyCompleted(executionId, execution);
+		}
 
 		bool scheduleTask(Task* task, uint64 delay = 0);
 		bool scheduleTask(Task* task, const Time& time);

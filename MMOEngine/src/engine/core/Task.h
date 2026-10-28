@@ -11,6 +11,8 @@
 #include "system/util/Timer.h"
 #include "system/thread/atomic/AtomicTime.h"
 
+#include "TaskExecutionTracker.h"
+
 //#define COLLECT_TASKSTATISTICS
 
 namespace engine {
@@ -218,6 +220,12 @@ namespace engine {
 		inline uint64 getLastElapsedTime() const {
 	  		return lastElapsedTime;
 	  	}
+
+		// Outer Rim: called by a task worker after this execution's final commit, once the worker has released its
+		// save-barrier blockMutex. A periodic task may already be running again on another worker, so an override
+		// must treat execution as per-invocation input and synchronize anything it keeps.
+		virtual void onExecutionFinished(const TaskExecutionTracker::Execution& execution) {
+		}
 
 	#ifdef TRACE_TASKS
 		void setScheduleTrace() {

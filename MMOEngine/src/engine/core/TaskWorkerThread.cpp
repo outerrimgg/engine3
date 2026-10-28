@@ -36,7 +36,7 @@ namespace TaskManagerNs {
 	}
 }
 
-TaskWorkerThread::TaskWorkerThread(const String& s, TaskQueue* queue, int cpu, bool blockDuringSave) : ServiceThread(s) {
+TaskWorkerThread::TaskWorkerThread(const String& s, TaskQueue* queue, int cpu, bool blockDuringSave) : ServiceThread(s), executionTracker(currentTaskMutex) {
 	setInfoLogLevel();
 	setGlobalLogging(true);
 
@@ -131,6 +131,8 @@ void TaskWorkerThread::run() {
 
 	TaskManagerNs::checkForDBHandle(initializeDBHandles);
 
+	TaskExecutionTracker::install(&executionTracker);
+
 	while (doRun) {
 		auto task = queue->pop();
 
@@ -158,7 +160,9 @@ void TaskWorkerThread::run() {
 
 		try {
 			{
+				const uint64 at = TaskExecutionTracker::now();
 				std::lock_guard<std::mutex> lk(currentTaskMutex);
+				executionTracker.beginLocked(at);
 				currentTask = task;
 			}
 
@@ -170,13 +174,25 @@ void TaskWorkerThread::run() {
 		}
 
 		{
+			const char* finishedName = task->getTaskName();
+			const uint64 at = TaskExecutionTracker::now();
 			std::lock_guard<std::mutex> lk(currentTaskMutex);
 			currentTask = nullptr;
+			executionTracker.finishLocked(finishedName, at);
 		}
 
 		uint64 elapsedTime = task->getLastElapsedTime();
 
 		blockMutex.unlock();
+
+		// Outside blockMutex: anything the task does with its finished execution cannot hold up the save barrier.
+		try {
+			task->onExecutionFinished(executionTracker.getCompleted());
+		} catch (const Exception& e) {
+			e.printStackTrace();
+		} catch (...) {
+			error("unreported Exception caught in onExecutionFinished");
+		}
 
 		static const bool slowTaskLog = Core::getIntProperty("TaskManager.slowTaskLog", 0);
 		const char* taskName = task->getTaskName();
@@ -461,6 +477,21 @@ void TaskWorkerThread::setPause(bool val) {
 	if (val) {
 		queue->wake();
 	}
+}
+
+void TaskWorkerThread::getCurrentExecution(String& taskName, TaskExecutionTracker::Execution& execution) const {
+	std::lock_guard<std::mutex> lk(currentTaskMutex);
+
+	executionTracker.copyCurrentLocked(execution);
+
+	if (currentTask == nullptr) {
+		taskName = String();
+		return;
+	}
+
+	const char* name = currentTask->getTaskName();
+
+	taskName = name != nullptr ? String(name) : String("<unnamed>");
 }
 
 String TaskWorkerThread::getCurrentTaskName() const {

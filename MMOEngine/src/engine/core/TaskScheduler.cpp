@@ -11,7 +11,7 @@
 
 static Time startTime;
 
-TaskScheduler::TaskScheduler() : Thread(), Logger("TaskScheduler") {
+TaskScheduler::TaskScheduler() : Thread(), Logger("TaskScheduler"), executionTracker(currentTaskMutex) {
 	taskManager = nullptr;
 
 	doRun = false;
@@ -31,7 +31,7 @@ TaskScheduler::TaskScheduler() : Thread(), Logger("TaskScheduler") {
 	setGlobalLogging(true);
 }
 
-TaskScheduler::TaskScheduler(const String& s) : Thread(s), Logger(s) {
+TaskScheduler::TaskScheduler(const String& s) : Thread(s), Logger(s), executionTracker(currentTaskMutex) {
 	taskManager = nullptr;
 
 	doRun = false;
@@ -76,6 +76,8 @@ void TaskScheduler::setPause(bool val) {
 void TaskScheduler::run() {
 	Task* task = nullptr;
 
+	TaskExecutionTracker::install(&executionTracker);
+
 	while (doRun) {
 		auto task = tasks.get();
 
@@ -92,7 +94,9 @@ void TaskScheduler::run() {
 		}
 
 		{
+			const uint64 at = TaskExecutionTracker::now();
 			std::lock_guard<std::mutex> lk(currentTaskMutex);
+			executionTracker.beginLocked(at);
 			currentTask = task;
 		}
 
@@ -111,8 +115,11 @@ void TaskScheduler::run() {
 		}
 
 		{
+			const char* finishedName = task->getTaskName();
+			const uint64 at = TaskExecutionTracker::now();
 			std::lock_guard<std::mutex> lk(currentTaskMutex);
 			currentTask = nullptr;
+			executionTracker.finishLocked(finishedName, at);
 		}
 
 		blockMutex.unlock();
@@ -200,6 +207,21 @@ HashTable<String, uint64> TaskScheduler::getTasksCount() {
 	auto copy = tasksCount;
 
 	return copy;
+}
+
+void TaskScheduler::getCurrentExecution(String& taskName, TaskExecutionTracker::Execution& execution) const {
+	std::lock_guard<std::mutex> lk(currentTaskMutex);
+
+	executionTracker.copyCurrentLocked(execution);
+
+	if (currentTask == nullptr) {
+		taskName = String();
+		return;
+	}
+
+	const char* name = currentTask->getTaskName();
+
+	taskName = name != nullptr ? String(name) : String("<unnamed>");
 }
 
 String TaskScheduler::getCurrentTaskName() const {

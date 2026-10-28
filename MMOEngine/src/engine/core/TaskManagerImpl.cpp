@@ -309,6 +309,11 @@ namespace {
 	// 2026-10-26: saves that wait 0.5-1.7 s (no hang) queue movement and snap players back, so any single holder that
 	// keeps the barrier waiting slowMs or longer is also named, once, with how long it held it: "SAVE BARRIER SLOW".
 	// The name is taken at the slowMs mark, while that task is still running.
+	// 2026-10-28: the holder's name now carries its execution number, phase and ages (TaskExecutionTracker), read in
+	// one coherent copy, and the SLOW line adds that same execution's finished split - dispatch, setup, run, final
+	// commit, finish and the task's own sections. A task's elapsed time stops before its commit, which the barrier
+	// still waits for. The finished split is fetched by execution number with mtx released, and only if that execution
+	// is still the thread's last one; the barrier holds the thread's blockMutex by then, so it cannot start another.
 	class SaveBarrierWatch {
 		using Clock = std::chrono::steady_clock;
 
@@ -320,7 +325,8 @@ namespace {
 		std::condition_variable cv;
 		bool done;
 		Clock::time_point doneAt;
-		std::function<String()> describe;
+		std::function<String(uint64&)> describe; // also fills the holder's execution number (0 = none)
+		std::function<String(uint64)> describeFinished; // the finished split of that execution, or empty
 		uint32 holder; // bumped by every waitingOn()
 		Clock::time_point holderSince;
 		uint32 slowHolder; // holder named as slow; its release time is stamped by waitingOn() or the destructor
@@ -348,6 +354,8 @@ namespace {
 			uint32 namedHolder = 0;
 			Clock::time_point slowSince;
 			String slowWhat;
+			uint64 slowExecution = 0;
+			std::function<String(uint64)> slowFinished;
 
 			std::unique_lock<std::mutex> lk(mtx);
 
@@ -357,22 +365,27 @@ namespace {
 
 				Vector<String> lines;
 
+				bool reportSlow = false;
+				int64 slowBlockedMs = 0;
+
 				if (slowHolder != 0 && slowReleased) {
-					StringBuffer msg;
-					msg << "SAVE BARRIER SLOW: blocked " << millisBetween(slowSince, slowReleasedAt) << " ms on " << slowWhat;
-					lines.add(msg.toString());
+					reportSlow = true;
+					slowBlockedMs = millisBetween(slowSince, slowReleasedAt);
 
 					slowHolder = 0;
 					slowReleased = false;
 				}
 
-				std::function<String()> slowDescribe;
-				std::function<String()> stuckDescribe;
+				std::function<String(uint64&)> slowDescribe;
+				std::function<String(uint64)> slowDescribeFinished;
+				std::function<String(uint64&)> stuckDescribe;
 				const uint32 current = holder;
 				const auto currentSince = holderSince;
 
-				if (!finished && slowMs > 0 && describe && current != namedHolder && millisBetween(currentSince, now) >= slowMs)
+				if (!finished && slowMs > 0 && describe && current != namedHolder && millisBetween(currentSince, now) >= slowMs) {
 					slowDescribe = describe;
+					slowDescribeFinished = describeFinished;
+				}
 
 				const bool stuck = !finished && warnSeconds > 0 && now >= nextStuck;
 
@@ -383,13 +396,26 @@ namespace {
 
 				lk.unlock();
 
+				if (reportSlow) {
+					const String finishedWhat = slowFinished ? slowFinished(slowExecution) : String();
+
+					StringBuffer msg;
+					msg << "SAVE BARRIER SLOW: blocked " << slowBlockedMs << " ms on " << slowWhat << "; "
+						<< (finishedWhat.isEmpty() ? String("finished split unavailable") : finishedWhat);
+					lines.add(msg.toString());
+				}
+
+				uint64 namedExecution = 0;
+
 				if (slowDescribe)
-					slowWhat = slowDescribe();
+					slowWhat = slowDescribe(namedExecution);
 
 				if (stuck) {
+					uint64 stuckExecution = 0;
+
 					StringBuffer msg;
 					msg << "SAVE BARRIER STUCK: waited " << (int64) std::chrono::duration_cast<std::chrono::seconds>(now - start).count()
-						<< "s for the task manager to stop; still blocked on " << (stuckDescribe ? stuckDescribe() : String("(nothing yet)"));
+						<< "s for the task manager to stop; still blocked on " << (stuckDescribe ? stuckDescribe(stuckExecution) : String("(nothing yet)"));
 					lines.add(msg.toString());
 				}
 
@@ -400,6 +426,8 @@ namespace {
 
 				if (slowDescribe) {
 					namedHolder = current;
+					slowExecution = namedExecution;
+					slowFinished = slowDescribeFinished;
 					slowSince = currentSince;
 					slowHolder = current;
 					slowReleased = false;
@@ -447,11 +475,12 @@ namespace {
 		SaveBarrierWatch(const SaveBarrierWatch&) = delete;
 		SaveBarrierWatch& operator=(const SaveBarrierWatch&) = delete;
 
-		void waitingOn(std::function<String()> what) {
+		void waitingOn(std::function<String(uint64&)> what, std::function<String(uint64)> finishedWhat) {
 			std::lock_guard<std::mutex> lk(mtx);
 			const auto now = Clock::now();
 			endHolder(now);
 			describe = std::move(what);
+			describeFinished = std::move(finishedWhat);
 			++holder;
 			holderSince = now;
 		}
@@ -469,10 +498,37 @@ namespace {
 		return result;
 	}
 
-	String describeBarrierHolder(const char* kind, const String& customName, const String& name, uint32 threadNumber, const String& taskName) {
+	// Owner is a TaskWorkerThread or TaskScheduler. The task name and execution state come from one locked copy.
+	template<class Owner>
+	String describeBarrierHolder(const char* kind, const Owner* owner, const String& customName, const String& name, uint32 threadNumber,
+			uint64& executionId) {
+		String taskName;
+		TaskExecutionTracker::Execution execution;
+		owner->getCurrentExecution(taskName, execution);
+
+		char state[256];
+		TaskExecutionTracker::describeCurrent(execution, TaskExecutionTracker::now(), state, sizeof(state));
+		executionId = execution.phase != TaskExecutionTracker::IDLE ? execution.id : 0;
+
 		StringBuffer msg;
 		msg << kind << " '" << (customName.isEmpty() ? name : customName) << "' (thread " << threadNumber << ") running task '"
-			<< (taskName.isEmpty() ? String("<none>") : demangledTaskName(taskName.toCharArray())) << "'";
+			<< (taskName.isEmpty() ? String("<none>") : demangledTaskName(taskName.toCharArray())) << "' [" << state << "]";
+
+		return msg.toString();
+	}
+
+	template<class Owner>
+	String describeFinishedExecution(const Owner* owner, uint64 executionId) {
+		TaskExecutionTracker::Execution execution;
+
+		if (!owner->getCompletedExecution(executionId, execution))
+			return String();
+
+		char split[640];
+		TaskExecutionTracker::describeCompleted(execution, split, sizeof(split));
+
+		StringBuffer msg;
+		msg << "finished " << split;
 
 		return msg.toString();
 	}
@@ -512,8 +568,10 @@ Vector<Pair<Locker*, TaskWorkerThread*>>* TaskManagerImpl::blockTaskManager() {
 
 		Mutex* blockMutex = worker->getBlockMutex();
 
-		barrierWatch.waitingOn([worker] {
-			return describeBarrierHolder("worker", worker->getCustomThreadName(), worker->getName(), worker->getThreadNumber(), worker->getCurrentTaskName());
+		barrierWatch.waitingOn([worker](uint64& executionId) {
+			return describeBarrierHolder("worker", worker, worker->getCustomThreadName(), worker->getName(), worker->getThreadNumber(), executionId);
+		}, [worker](uint64 executionId) {
+			return describeFinishedExecution(worker, executionId);
 		});
 
 		Locker* locker = new Locker(blockMutex);
@@ -533,8 +591,10 @@ Vector<Pair<Locker*, TaskWorkerThread*>>* TaskManagerImpl::blockTaskManager() {
 
 		Mutex* blockMutex = scheduler->getBlockMutex();
 
-		barrierWatch.waitingOn([scheduler] {
-			return describeBarrierHolder("scheduler", scheduler->getCustomThreadName(), scheduler->Thread::getName(), scheduler->getThreadNumber(), scheduler->getCurrentTaskName());
+		barrierWatch.waitingOn([scheduler](uint64& executionId) {
+			return describeBarrierHolder("scheduler", scheduler, scheduler->getCustomThreadName(), scheduler->Thread::getName(), scheduler->getThreadNumber(), executionId);
+		}, [scheduler](uint64 executionId) {
+			return describeFinishedExecution(scheduler, executionId);
 		});
 
 		Locker* locker = new Locker(blockMutex);
@@ -554,8 +614,10 @@ Vector<Pair<Locker*, TaskWorkerThread*>>* TaskManagerImpl::blockTaskManager() {
 
 		Mutex* blockMutex = scheduler->getBlockMutex();
 
-		barrierWatch.waitingOn([scheduler] {
-			return describeBarrierHolder("scheduler", scheduler->getCustomThreadName(), scheduler->Thread::getName(), scheduler->getThreadNumber(), scheduler->getCurrentTaskName());
+		barrierWatch.waitingOn([scheduler](uint64& executionId) {
+			return describeBarrierHolder("scheduler", scheduler, scheduler->getCustomThreadName(), scheduler->Thread::getName(), scheduler->getThreadNumber(), executionId);
+		}, [scheduler](uint64 executionId) {
+			return describeFinishedExecution(scheduler, executionId);
 		});
 
 		Locker* locker = new Locker(blockMutex);
